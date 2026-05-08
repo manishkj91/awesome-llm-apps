@@ -1,1 +1,1 @@
-"""Earnings Call Analyst Agent package."""
+"""📡 Earnings Call Analyst Agent package."""

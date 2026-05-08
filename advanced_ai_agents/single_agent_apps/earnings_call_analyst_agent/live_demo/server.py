@@ -72,7 +72,7 @@ class RuntimeSession:
 sessions: dict[str, RuntimeSession] = {}
 session_lock = asyncio.Lock()
 
-app = FastAPI(title="Earnings Call Analyst Agent")
+app = FastAPI(title="📡 Earnings Call Analyst Agent")
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["http://127.0.0.1:4188", "http://localhost:4188"],
