@@ -2,7 +2,9 @@ from __future__ import annotations
 
 import asyncio
 import inspect
+import json
 import os
+import re
 import uuid
 
 from google.genai import types
@@ -74,3 +76,39 @@ def run_adk_agent_content(
 def _ensure_google_api_key_alias() -> None:
     if os.getenv("GEMINI_API_KEY") and not os.getenv("GOOGLE_API_KEY"):
         os.environ["GOOGLE_API_KEY"] = os.environ["GEMINI_API_KEY"]
+
+
+def has_adk_credentials() -> bool:
+    _ensure_google_api_key_alias()
+    if os.getenv("GOOGLE_API_KEY"):
+        return True
+    if not _env_truthy("GOOGLE_GENAI_USE_VERTEXAI"):
+        return False
+    return bool(os.getenv("GOOGLE_CLOUD_PROJECT"))
+
+
+def adk_auth_mode() -> str:
+    _ensure_google_api_key_alias()
+    if os.getenv("GOOGLE_API_KEY"):
+        return "api_key"
+    if _env_truthy("GOOGLE_GENAI_USE_VERTEXAI") and os.getenv("GOOGLE_CLOUD_PROJECT"):
+        return "vertex_ai"
+    return "missing"
+
+
+def parse_json_object(text: str) -> dict:
+    cleaned = text.strip()
+    cleaned = re.sub(r"^```(?:json)?\s*|\s*```$", "", cleaned, flags=re.I | re.S)
+    start = cleaned.find("{")
+    end = cleaned.rfind("}")
+    if start == -1 or end == -1:
+        return {}
+    try:
+        data = json.loads(cleaned[start : end + 1])
+    except json.JSONDecodeError:
+        return {}
+    return data if isinstance(data, dict) else {}
+
+
+def _env_truthy(name: str) -> bool:
+    return str(os.getenv(name, "")).strip().lower() in {"1", "true", "yes", "on"}

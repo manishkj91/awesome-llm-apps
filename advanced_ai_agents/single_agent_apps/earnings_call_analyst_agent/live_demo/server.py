@@ -34,8 +34,8 @@ def _load_env() -> None:
 
 
 _load_env()
-if os.getenv("GEMINI_API_KEY") and not os.getenv("GOOGLE_API_KEY"):
-    os.environ["GOOGLE_API_KEY"] = os.environ["GEMINI_API_KEY"]
+
+from earnings_call_analyst_agent.adk_runtime import adk_auth_mode, has_adk_credentials  # noqa: E402
 
 from earnings_call_analyst_agent.agent import generate_insights  # noqa: E402
 from earnings_call_analyst_agent.research import build_research_pack  # noqa: E402
@@ -89,9 +89,13 @@ def index() -> FileResponse:
 
 @app.get("/health")
 def health() -> dict[str, Any]:
+    auth_mode = adk_auth_mode()
+    has_credentials = has_adk_credentials()
     return {
         "ok": True,
-        "has_google_key": bool(os.getenv("GOOGLE_API_KEY") or os.getenv("GEMINI_API_KEY")),
+        "has_adk_credentials": has_credentials,
+        "has_google_key": has_credentials,
+        "auth_mode": auth_mode,
     }
 
 
@@ -176,7 +180,8 @@ async def _run_session(session_id: str) -> None:
                 "transcript_source": transcript_source,
                 "chunks": len(chunks),
                 "insights": len(insights),
-                "analysis_engine": "adk" if os.getenv("GOOGLE_API_KEY") else "local_fallback",
+                "analysis_engine": "adk" if has_adk_credentials() else "adk_unavailable",
+                "auth_mode": adk_auth_mode(),
             },
         )
         await _set_status(runtime, "ready", 100, runtime.data.message)

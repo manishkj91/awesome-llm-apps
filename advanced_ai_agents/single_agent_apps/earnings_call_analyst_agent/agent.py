@@ -6,7 +6,7 @@ import os
 import re
 from typing import Any
 
-from .adk_runtime import run_adk_agent_text
+from .adk_runtime import has_adk_credentials, parse_json_object, run_adk_agent_text
 from .schemas import (
     Citation,
     InsightEvent,
@@ -45,11 +45,11 @@ def generate_insights(
     max_chunks: int = 64,
 ) -> list[InsightEvent]:
     selected = select_signal_chunks(chunks, limit=max_chunks)
-    if _has_gemini_key() and root_agent is not None:
+    if has_adk_credentials() and root_agent is not None:
         insights = _generate_with_adk(metadata, research, selected)
         if insights:
             return sorted(_realign_event_times(insights, selected))
-    return sorted(_realign_event_times(_generate_local_insights(research, selected), selected))
+    return []
 
 
 def select_signal_chunks(chunks: list[TranscriptChunk], limit: int = 64) -> list[TranscriptChunk]:
@@ -109,7 +109,7 @@ Transcript chunks:
 {json.dumps(chunk_payload)}
 """
     try:
-        payload = _parse_json_object(run_adk_agent_text(root_agent, prompt))
+        payload = parse_json_object(run_adk_agent_text(root_agent, prompt))
     except Exception:
         return []
 
@@ -143,64 +143,6 @@ Transcript chunks:
         except Exception:
             continue
     return _dedupe_events([event for event in events if event.headline and event.quote])
-
-
-def _generate_local_insights(
-    research: ResearchPack, chunks: list[TranscriptChunk]
-) -> list[InsightEvent]:
-    events: list[InsightEvent] = []
-    tone_points: list[float] = []
-    for chunk in chunks[:80]:
-        text = chunk.text
-        lower = text.lower()
-        numbers = re.findall(r"(?:\$?\d+(?:\.\d+)?\s*(?:%|percent|million|billion|basis points|bps)?)", text)
-        if numbers and any(term in lower for term in ["revenue", "margin", "guidance", "cash", "eps", "growth"]):
-            quote = _quote(text, numbers[0])
-            events.append(
-                InsightEvent(
-                    id=_stable_id("numbers", chunk.start, quote),
-                    start_time=chunk.start,
-                    end_time=chunk.end,
-                    agent="numbers_reconciler",
-                    severity="medium",
-                    headline=f"Numeric claim detected: {numbers[0]}",
-                    quote=quote,
-                    confidence=0.62,
-                    explanation="Gemini analysis was unavailable, so this local pass flagged a financial metric for review.",
-                    mini_viz=MiniVisualization(
-                        type="metric_table",
-                        title="Detected metric",
-                        rows=[["Metric", numbers[0]], ["Context", _compact_context(lower)]],
-                    ),
-                    citations=_default_citations(research),
-                )
-            )
-        hedge_count = sum(lower.count(term) for term in ["uncertain", "challenging", "headwind", "pressure", "cautious", "volatile"])
-        confident_count = sum(lower.count(term) for term in ["confident", "strong", "record", "accelerat", "robust"])
-        tone = max(0, min(100, 50 + confident_count * 10 - hedge_count * 12))
-        tone_points.append(tone)
-        if hedge_count >= 2:
-            quote = _quote(text, "headwind" if "headwind" in lower else text.split()[0])
-            events.append(
-                InsightEvent(
-                    id=_stable_id("tone", chunk.start, quote),
-                    start_time=chunk.start,
-                    end_time=chunk.end,
-                    agent="cfo_tone",
-                    severity="low",
-                    headline="Tone shifted toward caution",
-                    quote=quote,
-                    confidence=0.58,
-                    explanation="Local tone scan found clustered caution language in this segment.",
-                    mini_viz=MiniVisualization(
-                        type="tone_sparkline",
-                        title="Tone score",
-                        points=tone_points[-12:],
-                    ),
-                    citations=[Citation(label="Transcript segment", source="YouTube captions")],
-                )
-            )
-    return _dedupe_events(events)[:30]
 
 
 def _chunk_signal_score(text: str) -> int:
@@ -246,20 +188,6 @@ def _research_context(research: ResearchPack) -> str:
     )
 
 
-def _parse_json_object(text: str) -> dict[str, Any]:
-    cleaned = text.strip()
-    cleaned = re.sub(r"^```(?:json)?\s*|\s*```$", "", cleaned, flags=re.I | re.S)
-    start = cleaned.find("{")
-    end = cleaned.rfind("}")
-    if start == -1 or end == -1:
-        return {}
-    try:
-        data = json.loads(cleaned[start : end + 1])
-    except json.JSONDecodeError:
-        return {}
-    return data if isinstance(data, dict) else {}
-
-
 def _dedupe_events(events: list[InsightEvent]) -> list[InsightEvent]:
     seen: set[tuple[str, int, str]] = set()
     deduped: list[InsightEvent] = []
@@ -283,35 +211,6 @@ def _event_id(raw: dict[str, Any]) -> str:
 def _stable_id(*parts: object) -> str:
     digest = hashlib.sha1("|".join(str(part) for part in parts).encode()).hexdigest()
     return digest[:12]
-
-
-def _has_gemini_key() -> bool:
-    if os.getenv("GEMINI_API_KEY") and not os.getenv("GOOGLE_API_KEY"):
-        os.environ["GOOGLE_API_KEY"] = os.environ["GEMINI_API_KEY"]
-    return bool(os.getenv("GOOGLE_API_KEY"))
-
-
-def _quote(text: str, needle: str) -> str:
-    sentences = re.split(r"(?<=[.!?])\s+", text)
-    for sentence in sentences:
-        if needle.lower() in sentence.lower():
-            return sentence.strip()[:420]
-    return text.strip()[:420]
-
-
-def _compact_context(text: str) -> str:
-    for term in ["revenue", "margin", "guidance", "cash", "eps", "growth"]:
-        if term in text:
-            return term
-    return "financial statement"
-
-
-def _default_citations(research: ResearchPack) -> list[Citation]:
-    citations = [Citation(label="Transcript segment", source="YouTube captions")]
-    if research.documents:
-        doc = research.documents[0]
-        citations.append(Citation(label=doc.kind, source=doc.title, url=doc.url))
-    return citations
 
 
 def _realign_event_times(

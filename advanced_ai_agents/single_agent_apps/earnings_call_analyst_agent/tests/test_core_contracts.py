@@ -1,8 +1,19 @@
 import pytest
 
-from earnings_call_analyst_agent.schemas import InsightEvent, ResearchDocument, TranscriptSegment
-from earnings_call_analyst_agent.adk_runtime import _ensure_google_api_key_alias
-from earnings_call_analyst_agent.agent import _realign_event_times
+from earnings_call_analyst_agent.schemas import (
+    InsightEvent,
+    ResearchDocument,
+    ResearchPack,
+    TranscriptSegment,
+    VideoMetadata,
+)
+from earnings_call_analyst_agent.adk_runtime import (
+    _ensure_google_api_key_alias,
+    adk_auth_mode,
+    has_adk_credentials,
+    parse_json_object,
+)
+from earnings_call_analyst_agent.agent import _realign_event_times, generate_insights
 from earnings_call_analyst_agent.research import build_research_pack, fetch_market_news
 from earnings_call_analyst_agent.youtube_ingest import (
     chunk_transcript,
@@ -185,24 +196,64 @@ def test_fetch_market_news_prefers_adk_grounded_search(monkeypatch):
         )
     ]
     monkeypatch.setattr("earnings_call_analyst_agent.research.fetch_adk_grounded_news", lambda *_args, **_kwargs: grounded)
-    monkeypatch.setattr("earnings_call_analyst_agent.research.fetch_yahoo_news", lambda *_args, **_kwargs: pytest.fail("Yahoo fallback should not run when ADK search resolves news"))
 
     assert fetch_market_news("TSLA", "Tesla") == grounded
 
 
-def test_fetch_market_news_falls_back_when_adk_search_is_empty(monkeypatch):
-    fallback = [
-        ResearchDocument(
-            title="Tesla stock update - MarketWatch",
-            kind="news",
-            url="https://www.marketwatch.com/example",
-        )
-    ]
+def test_fetch_market_news_does_not_use_non_adk_fallbacks(monkeypatch):
     monkeypatch.setattr("earnings_call_analyst_agent.research.fetch_adk_grounded_news", lambda *_args, **_kwargs: [])
-    monkeypatch.setattr("earnings_call_analyst_agent.research.fetch_yahoo_news", lambda *_args, **_kwargs: [])
-    monkeypatch.setattr("earnings_call_analyst_agent.research.fetch_google_news", lambda *_args, **_kwargs: fallback)
 
-    assert fetch_market_news("TSLA", "Tesla") == fallback
+    assert fetch_market_news("TSLA", "Tesla") == []
+
+
+def test_generate_insights_does_not_emit_local_heuristic_cards_without_adk(monkeypatch):
+    monkeypatch.setattr("earnings_call_analyst_agent.agent.has_adk_credentials", lambda: False)
+    chunks = chunk_transcript(
+        [TranscriptSegment(start=0, duration=5, text="Revenue grew 12 percent and margin expanded.")],
+        window_seconds=60,
+    )
+
+    insights = generate_insights(
+        VideoMetadata(video_id="abcDEF12345", title="Example Q4 earnings call"),
+        ResearchPack(company="Example Co", ticker="EXM"),
+        chunks,
+    )
+
+    assert insights == []
+
+
+def test_generate_insights_uses_adk_agent_path(monkeypatch):
+    monkeypatch.setattr("earnings_call_analyst_agent.agent.has_adk_credentials", lambda: True)
+    monkeypatch.setattr("earnings_call_analyst_agent.agent.root_agent", object())
+    monkeypatch.setattr(
+        "earnings_call_analyst_agent.agent.run_adk_agent_text",
+        lambda *_args, **_kwargs: """
+        {"insights": [{
+          "start_time": 0,
+          "end_time": 5,
+          "agent": "numbers_reconciler",
+          "severity": "medium",
+          "headline": "Revenue growth called out",
+          "quote": "Revenue grew 12 percent",
+          "confidence": 0.82,
+          "explanation": "Revenue acceleration matters for investor expectations.",
+          "mini_viz": {"type": "metric_table", "title": "Revenue", "rows": [["Current", "12%"]]},
+          "citations": [{"label": "Transcript segment", "source": "YouTube captions"}]
+        }]}
+        """,
+    )
+    chunks = chunk_transcript(
+        [TranscriptSegment(start=0, duration=5, text="Revenue grew 12 percent and margin expanded.")],
+        window_seconds=60,
+    )
+
+    insights = generate_insights(
+        VideoMetadata(video_id="abcDEF12345", title="Example Q4 earnings call"),
+        ResearchPack(company="Example Co", ticker="EXM"),
+        chunks,
+    )
+
+    assert [insight.headline for insight in insights] == ["Revenue growth called out"]
 
 
 def test_gemini_key_is_aliased_for_adk(monkeypatch):
@@ -212,6 +263,26 @@ def test_gemini_key_is_aliased_for_adk(monkeypatch):
     _ensure_google_api_key_alias()
 
     assert __import__("os").environ["GOOGLE_API_KEY"] == "test-key"
+
+
+def test_vertex_ai_env_counts_as_adk_credentials(monkeypatch):
+    monkeypatch.delenv("GOOGLE_API_KEY", raising=False)
+    monkeypatch.delenv("GEMINI_API_KEY", raising=False)
+    monkeypatch.setenv("GOOGLE_GENAI_USE_VERTEXAI", "True")
+    monkeypatch.setenv("GOOGLE_CLOUD_PROJECT", "demo-project")
+
+    assert has_adk_credentials() is True
+    assert adk_auth_mode() == "vertex_ai"
+
+
+def test_missing_vertex_project_does_not_count_as_adk_credentials(monkeypatch):
+    monkeypatch.delenv("GOOGLE_API_KEY", raising=False)
+    monkeypatch.delenv("GEMINI_API_KEY", raising=False)
+    monkeypatch.delenv("GOOGLE_CLOUD_PROJECT", raising=False)
+    monkeypatch.setenv("GOOGLE_GENAI_USE_VERTEXAI", "True")
+
+    assert has_adk_credentials() is False
+    assert adk_auth_mode() == "missing"
 
 
 def test_parse_transcribed_segments_accepts_json_with_code_fences():
@@ -231,3 +302,7 @@ def test_parse_transcribed_segments_accepts_json_with_code_fences():
         "Revenue grew this quarter.",
     ]
     assert segments[1].duration == 4.5
+
+
+def test_shared_json_parser_accepts_fenced_json():
+    assert parse_json_object('```json\n{"ok": true}\n```') == {"ok": True}

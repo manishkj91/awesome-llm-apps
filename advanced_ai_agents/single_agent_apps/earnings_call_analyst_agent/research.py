@@ -1,22 +1,18 @@
 from __future__ import annotations
 
-import json
 import os
 import re
-import xml.etree.ElementTree as ET
 from functools import lru_cache
 from typing import Any
 
 import requests
 
-from .adk_runtime import run_adk_agent_text
+from .adk_runtime import has_adk_credentials, parse_json_object, run_adk_agent_text
 from .schemas import ResearchDocument, ResearchPack, TranscriptSegment, VideoMetadata
 
 
 SEC_TICKERS_URL = "https://www.sec.gov/files/company_tickers.json"
 SEC_SUBMISSIONS_URL = "https://data.sec.gov/submissions/CIK{cik}.json"
-YAHOO_NEWS_RSS = "https://feeds.finance.yahoo.com/rss/2.0/headline"
-GOOGLE_NEWS_RSS = "https://news.google.com/rss/search"
 MODEL = os.getenv("EARNINGS_GEMINI_MODEL", "gemini-3-flash-preview")
 SEARCH_MODEL = os.getenv("EARNINGS_SEARCH_GEMINI_MODEL", "gemini-2.5-flash")
 
@@ -91,7 +87,7 @@ def build_research_pack(
 
 def infer_company_identity(title: str, channel: str, transcript_sample: str) -> dict[str, Any]:
     heuristic = _infer_identity_heuristically(title, channel, transcript_sample)
-    if not _has_gemini_key() or identity_agent is None:
+    if not has_adk_credentials() or identity_agent is None:
         return heuristic
 
     prompt = f"""
@@ -105,7 +101,7 @@ Transcript opening:
 {transcript_sample[:4000]}
 """
     try:
-        parsed = _parse_json_object(run_adk_agent_text(identity_agent, prompt))
+        parsed = parse_json_object(run_adk_agent_text(identity_agent, prompt))
         if parsed.get("company") or parsed.get("ticker"):
             return {**heuristic, **parsed}
     except Exception:
@@ -164,19 +160,13 @@ def fetch_sec_documents(ticker: str) -> tuple[list[ResearchDocument], list[str]]
 
 
 def fetch_market_news(ticker: str, company: str = "", max_news: int = 8) -> list[ResearchDocument]:
-    grounded_items = fetch_adk_grounded_news(ticker, company, max_news=max_news)
-    if grounded_items:
-        return grounded_items
-    yahoo_items = fetch_yahoo_news(ticker, max_news=max_news)
-    if yahoo_items:
-        return yahoo_items
-    return fetch_google_news(ticker, company, max_news=max_news)
+    return fetch_adk_grounded_news(ticker, company, max_news=max_news)
 
 
 def fetch_adk_grounded_news(
     ticker: str, company: str = "", max_news: int = 8
 ) -> list[ResearchDocument]:
-    if not _has_gemini_key() or market_news_agent is None:
+    if not has_adk_credentials() or market_news_agent is None:
         return []
 
     company_label = company or ticker
@@ -208,7 +198,7 @@ Rules:
     except Exception:
         return []
 
-    parsed = _parse_json_object(text)
+    parsed = parse_json_object(text)
     raw_items = parsed.get("items", [])
     if not isinstance(raw_items, list):
         return []
@@ -236,70 +226,6 @@ Rules:
             )
         )
         seen_urls.add(url)
-        if len(items) >= max_news:
-            break
-    return items
-
-
-def fetch_yahoo_news(ticker: str, max_news: int = 8) -> list[ResearchDocument]:
-    try:
-        response = requests.get(
-            YAHOO_NEWS_RSS,
-            params={"s": ticker, "region": "US", "lang": "en-US"},
-            timeout=8,
-        )
-        response.raise_for_status()
-        root = ET.fromstring(response.text)
-    except Exception:
-        return []
-
-    items: list[ResearchDocument] = []
-    for item in root.findall(".//item")[:max_news]:
-        title = item.findtext("title") or ""
-        link = item.findtext("link") or ""
-        description = re.sub("<[^>]+>", "", item.findtext("description") or "")
-        if title:
-            items.append(
-                ResearchDocument(
-                    title=title,
-                    kind="news",
-                    url=link,
-                    summary=" ".join(description.split())[:260],
-                )
-            )
-    return items
-
-
-def fetch_google_news(ticker: str, company: str = "", max_news: int = 8) -> list[ResearchDocument]:
-    query = " ".join(part for part in [company, ticker, "stock", "when:7d"] if part).strip()
-    headers = {"User-Agent": os.getenv("EARNINGS_USER_AGENT", "earnings-call-analyst-agent")}
-    try:
-        response = requests.get(
-            GOOGLE_NEWS_RSS,
-            params={"q": query, "hl": "en-US", "gl": "US", "ceid": "US:en"},
-            headers=headers,
-            timeout=8,
-        )
-        response.raise_for_status()
-        root = ET.fromstring(response.text)
-    except Exception:
-        return []
-
-    items: list[ResearchDocument] = []
-    for item in root.findall(".//item"):
-        title = " ".join((item.findtext("title") or "").split())
-        link = item.findtext("link") or ""
-        description = re.sub("<[^>]+>", "", item.findtext("description") or "")
-        if not title or not link or _is_low_quality_news_title(title):
-            continue
-        items.append(
-            ResearchDocument(
-                title=title,
-                kind="news",
-                url=link,
-                summary=" ".join(description.split())[:260],
-            )
-        )
         if len(items) >= max_news:
             break
     return items
@@ -360,21 +286,3 @@ def _clean_company_name(metadata: VideoMetadata) -> str:
     title = re.sub(r"[-|:]+", " ", title)
     words = [word for word in title.split() if word.strip()]
     return " ".join(words[:5]) or metadata.author_name or "Unknown company"
-
-
-def _has_gemini_key() -> bool:
-    return bool(os.getenv("GOOGLE_API_KEY") or os.getenv("GEMINI_API_KEY"))
-
-
-def _parse_json_object(text: str) -> dict[str, Any]:
-    cleaned = text.strip()
-    cleaned = re.sub(r"^```(?:json)?\s*|\s*```$", "", cleaned, flags=re.I | re.S)
-    start = cleaned.find("{")
-    end = cleaned.rfind("}")
-    if start == -1 or end == -1:
-        return {}
-    try:
-        data = json.loads(cleaned[start : end + 1])
-    except json.JSONDecodeError:
-        return {}
-    return data if isinstance(data, dict) else {}

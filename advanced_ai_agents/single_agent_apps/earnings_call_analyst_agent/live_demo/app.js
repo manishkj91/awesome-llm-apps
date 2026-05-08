@@ -139,9 +139,12 @@ async function checkHealth() {
   try {
     const response = await fetch("/health");
     const health = await response.json();
-    healthLine.textContent = health.has_google_key
-      ? "Gemini key detected"
-      : "No Gemini key detected; local fallback available";
+    const hasAdkCredentials = health.has_adk_credentials ?? health.has_google_key;
+    healthLine.textContent = hasAdkCredentials
+      ? health.auth_mode === "vertex_ai"
+        ? "Vertex AI credentials detected"
+        : "Gemini API key detected"
+      : "No ADK credentials detected; analyst cards disabled";
   } catch {
     healthLine.textContent = "Backend unavailable";
   }

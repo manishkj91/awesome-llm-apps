@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import json
 import os
 import re
 import shutil
@@ -12,7 +11,7 @@ from urllib.parse import parse_qs, urlparse
 
 import requests
 
-from .adk_runtime import run_adk_agent_content
+from .adk_runtime import has_adk_credentials, parse_json_object, run_adk_agent_content
 from .schemas import TranscriptChunk, TranscriptSegment, VideoMetadata
 
 
@@ -149,10 +148,10 @@ def load_transcript(video_id: str) -> tuple[list[TranscriptSegment], str]:
 def transcribe_audio_with_adk(
     video_id: str, on_progress: Optional[Callable[[int, str], None]] = None
 ) -> list[TranscriptSegment]:
-    if os.getenv("GEMINI_API_KEY") and not os.getenv("GOOGLE_API_KEY"):
-        os.environ["GOOGLE_API_KEY"] = os.environ["GEMINI_API_KEY"]
-    if not os.getenv("GOOGLE_API_KEY"):
-        raise RuntimeError("GOOGLE_API_KEY is required for audio transcription fallback.")
+    if not has_adk_credentials():
+        raise RuntimeError(
+            "GOOGLE_API_KEY or Vertex AI environment is required for audio transcription fallback."
+        )
 
     try:
         from google.genai import types
@@ -235,7 +234,7 @@ Chunk starts at {chunk_offset} seconds in the original video.
         return sorted(segments, key=lambda segment: segment.start)
 
 def parse_transcribed_segments(text: str) -> list[TranscriptSegment]:
-    data = _parse_json_object(text)
+    data = parse_json_object(text)
     raw_segments = data.get("segments", [])
     if not isinstance(raw_segments, list):
         return []
@@ -336,17 +335,3 @@ def _prepare_audio_chunks(audio_path: Path, temp_dir: Path) -> list[Path]:
 
     chunks = sorted(temp_dir.glob("chunk_*.mp3"))
     return [chunk for chunk in chunks if chunk.stat().st_size > 0]
-
-
-def _parse_json_object(text: str) -> dict:
-    cleaned = text.strip()
-    cleaned = re.sub(r"^```(?:json)?\s*|\s*```$", "", cleaned, flags=re.I | re.S)
-    start = cleaned.find("{")
-    end = cleaned.rfind("}")
-    if start == -1 or end == -1:
-        return {}
-    try:
-        data = json.loads(cleaned[start : end + 1])
-    except json.JSONDecodeError:
-        return {}
-    return data if isinstance(data, dict) else {}

@@ -12,7 +12,7 @@ This is built for the real earnings workflow: instead of reading a transcript af
 
 - Identifies the company, ticker, fiscal period, and peer set from the YouTube metadata and transcript opening
 - Builds a research pack with SEC filings and current market context
-- Uses an ADK news agent with Google Search grounding before falling back to finance feeds
+- Uses an ADK news agent with Google Search grounding for current market context
 - Hides unresolved context instead of showing empty research panels
 
 ### Quote-Anchored Signal Detection
@@ -34,7 +34,7 @@ This is built for the real earnings workflow: instead of reading a transcript af
 - Uses YouTube captions when available for precise timestamps
 - Falls back to ADK-powered audio transcription for captionless videos
 - Realigns generated cards to the closest caption segment so the video and quote stay in sync
-- Keeps a local heuristic fallback for basic metric and tone flags when Gemini is unavailable
+- Keeps the transcript, research pack, and analyst cards tied to the same source timeline
 
 ## How to get Started?
 
